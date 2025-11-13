@@ -1,0 +1,48 @@
+{
+  "name": "studio-emulator",
+  "version": "1.0.0",
+  "description": "Professional Audio Studio Designer & Acoustic Room Planner - 3D studio design tool with real-time visualization",
+  "main": "public/index.html",
+  "scripts": {
+    "start": "python3 -m http.server 8000",
+    "dev": "python3 -m http.server 8000",
+    "test": "echo \"No tests specified\" && exit 0"
+  },
+  "keywords": [
+    "studio",
+    "audio",
+    "3d",
+    "acoustics",
+    "design",
+    "recording",
+    "music-production",
+    "sound-engineering",
+    "three.js",
+    "react",
+    "webgl"
+  ],
+  "author": {
+    "name": "Obai Sukar",
+    "email": "obai@obaisukar.com",
+    "url": "https://obaisukar.com"
+  },
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/obaisukar/studio-emulator.git"
+  },
+  "bugs": {
+    "url": "https://github.com/obaisukar/studio-emulator/issues"
+  },
+  "homepage": "https://github.com/obaisukar/studio-emulator#readme",
+  "dependencies": {
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0",
+    "three": "^0.128.0"
+  },
+  "devDependencies": {},
+  "engines": {
+    "node": ">=14.0.0",
+    "npm": ">=6.0.0"
+  }
+}
