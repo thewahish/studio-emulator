@@ -1,6 +1,9 @@
 const { useState, useEffect, useRef } = React;
 
 const StudioEmulator = () => {
+    // Theme state
+    const [theme, setTheme] = useState('dark'); // 'light' or 'dark'
+
     // Room dimensions state
     const [roomDimensions, setRoomDimensions] = useState({
         width: 6,
@@ -11,6 +14,8 @@ const StudioEmulator = () => {
     // Equipment state
     const [equipment, setEquipment] = useState([]);
     const [selectedEquipment, setSelectedEquipment] = useState(null);
+    const [hoveredEquipment, setHoveredEquipment] = useState(null);
+    const [isDraggingObject, setIsDraggingObject] = useState(false);
 
     // Acoustic treatments state
     const [treatments, setTreatments] = useState([]);
@@ -21,12 +26,18 @@ const StudioEmulator = () => {
         spotlights: []
     });
 
+    // Context menu state
+    const [contextMenu, setContextMenu] = useState(null);
+
     // Canvas ref
     const canvasRef = useRef(null);
     const sceneRef = useRef(null);
     const cameraRef = useRef(null);
     const rendererRef = useRef(null);
-    const controlsRef = useRef(null);
+    const raycasterRef = useRef(null);
+    const mouseRef = useRef({ x: 0, y: 0 });
+    const selectedMeshRef = useRef(null);
+    const outlineRef = useRef(null);
 
     // Equipment catalog
     const equipmentCatalog = {
@@ -112,14 +123,37 @@ const StudioEmulator = () => {
         }
     };
 
+    // Theme colors
+    const themeColors = {
+        light: {
+            background: 0xf5f5f5,
+            floor: 0xe0e0e0,
+            wall: 0xf0f0f0,
+            grid1: 0xcccccc,
+            grid2: 0xe0e0e0,
+            fog: 0xf5f5f5,
+            ambient: 0.7
+        },
+        dark: {
+            background: 0x0a0a0a,
+            floor: 0x1a1a1a,
+            wall: 0x2a2a2a,
+            grid1: 0x444444,
+            grid2: 0x222222,
+            fog: 0x0a0a0a,
+            ambient: 0.4
+        }
+    };
+
     // Initialize Three.js scene
     useEffect(() => {
         if (!canvasRef.current) return;
 
         // Scene setup
         const scene = new THREE.Scene();
-        scene.background = new THREE.Color(0x0a0a0a);
-        scene.fog = new THREE.Fog(0x0a0a0a, 10, 50);
+        const colors = themeColors[theme];
+        scene.background = new THREE.Color(colors.background);
+        scene.fog = new THREE.Fog(colors.fog, 10, 50);
         sceneRef.current = scene;
 
         // Camera setup
@@ -143,8 +177,13 @@ const StudioEmulator = () => {
         renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         rendererRef.current = renderer;
 
+        // Raycaster for object picking
+        const raycaster = new THREE.Raycaster();
+        raycasterRef.current = raycaster;
+
         // Lights
-        const ambientLight = new THREE.AmbientLight(0xffffff, lighting.ambient);
+        const ambientLight = new THREE.AmbientLight(0xffffff, colors.ambient);
+        ambientLight.name = 'ambientLight';
         scene.add(ambientLight);
 
         const mainLight = new THREE.DirectionalLight(0xffffff, 0.8);
@@ -152,51 +191,181 @@ const StudioEmulator = () => {
         mainLight.castShadow = true;
         mainLight.shadow.mapSize.width = 2048;
         mainLight.shadow.mapSize.height = 2048;
+        mainLight.name = 'mainLight';
         scene.add(mainLight);
 
         // Grid helper
-        const gridHelper = new THREE.GridHelper(20, 20, 0x444444, 0x222222);
+        const gridHelper = new THREE.GridHelper(20, 20, colors.grid1, colors.grid2);
+        gridHelper.name = 'gridHelper';
         scene.add(gridHelper);
 
-        // Mouse controls
-        let isDragging = false;
+        // Mouse controls state
+        let isRotating = false;
         let previousMousePosition = { x: 0, y: 0 };
         let cameraRotation = { x: 0, y: 0 };
+        let dragPlane = null;
+        let dragOffset = new THREE.Vector3();
+
+        // Create invisible drag plane
+        const planeGeometry = new THREE.PlaneGeometry(100, 100);
+        const planeMaterial = new THREE.MeshBasicMaterial({
+            visible: false,
+            side: THREE.DoubleSide
+        });
+        dragPlane = new THREE.Mesh(planeGeometry, planeMaterial);
+        dragPlane.rotation.x = -Math.PI / 2;
+        dragPlane.name = 'dragPlane';
+        scene.add(dragPlane);
 
         const onMouseDown = (e) => {
-            isDragging = true;
+            e.preventDefault();
+
+            // Update mouse position for raycasting
+            const rect = canvasRef.current.getBoundingClientRect();
+            mouseRef.current.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+            mouseRef.current.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+            // Check for equipment click
+            raycaster.setFromCamera(mouseRef.current, camera);
+            const equipmentGroup = scene.getObjectByName('equipment-group');
+
+            if (equipmentGroup) {
+                const intersects = raycaster.intersectObjects(equipmentGroup.children, true);
+
+                if (intersects.length > 0) {
+                    const clickedMesh = intersects[0].object;
+                    const equipmentId = clickedMesh.userData.id;
+                    const equipmentItem = equipment.find(eq => eq.id === equipmentId);
+
+                    if (equipmentItem) {
+                        setSelectedEquipment(equipmentItem);
+                        selectedMeshRef.current = clickedMesh;
+                        setIsDraggingObject(true);
+
+                        // Calculate drag offset
+                        const planeIntersects = raycaster.intersectObject(dragPlane);
+                        if (planeIntersects.length > 0) {
+                            dragOffset.copy(planeIntersects[0].point).sub(clickedMesh.position);
+                        }
+                        return;
+                    }
+                }
+            }
+
+            // Start camera rotation
+            isRotating = true;
             previousMousePosition = { x: e.clientX, y: e.clientY };
         };
 
         const onMouseMove = (e) => {
-            if (!isDragging) return;
+            e.preventDefault();
 
-            const deltaX = e.clientX - previousMousePosition.x;
-            const deltaY = e.clientY - previousMousePosition.y;
+            // Update mouse position
+            const rect = canvasRef.current.getBoundingClientRect();
+            mouseRef.current.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+            mouseRef.current.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
 
-            cameraRotation.y += deltaX * 0.005;
-            cameraRotation.x += deltaY * 0.005;
+            // Handle object dragging
+            if (isDraggingObject && selectedMeshRef.current) {
+                raycaster.setFromCamera(mouseRef.current, camera);
+                const intersects = raycaster.intersectObject(dragPlane);
 
-            cameraRotation.x = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, cameraRotation.x));
+                if (intersects.length > 0) {
+                    const newPos = intersects[0].point.sub(dragOffset);
 
-            const radius = Math.sqrt(
-                camera.position.x ** 2 + camera.position.y ** 2 + camera.position.z ** 2
-            );
+                    // Update equipment position in state
+                    const equipmentId = selectedMeshRef.current.userData.id;
+                    setEquipment(prev => prev.map(item =>
+                        item.id === equipmentId
+                            ? { ...item, x: newPos.x, z: newPos.z }
+                            : item
+                    ));
+                }
+                return;
+            }
 
-            camera.position.x = radius * Math.sin(cameraRotation.y) * Math.cos(cameraRotation.x);
-            camera.position.z = radius * Math.cos(cameraRotation.y) * Math.cos(cameraRotation.x);
-            camera.position.y = radius * Math.sin(cameraRotation.x);
+            // Handle camera rotation
+            if (isRotating) {
+                const deltaX = e.clientX - previousMousePosition.x;
+                const deltaY = e.clientY - previousMousePosition.y;
 
-            camera.lookAt(0, 0, 0);
+                cameraRotation.y += deltaX * 0.005;
+                cameraRotation.x += deltaY * 0.005;
 
-            previousMousePosition = { x: e.clientX, y: e.clientY };
+                cameraRotation.x = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, cameraRotation.x));
+
+                const radius = Math.sqrt(
+                    camera.position.x ** 2 + camera.position.y ** 2 + camera.position.z ** 2
+                );
+
+                camera.position.x = radius * Math.sin(cameraRotation.y) * Math.cos(cameraRotation.x);
+                camera.position.z = radius * Math.cos(cameraRotation.y) * Math.cos(cameraRotation.x);
+                camera.position.y = radius * Math.sin(cameraRotation.x);
+
+                camera.lookAt(0, 0, 0);
+
+                previousMousePosition = { x: e.clientX, y: e.clientY };
+                return;
+            }
+
+            // Handle hover effect
+            raycaster.setFromCamera(mouseRef.current, camera);
+            const equipmentGroup = scene.getObjectByName('equipment-group');
+
+            if (equipmentGroup) {
+                const intersects = raycaster.intersectObjects(equipmentGroup.children, true);
+
+                if (intersects.length > 0) {
+                    const hoveredMesh = intersects[0].object;
+                    setHoveredEquipment(hoveredMesh.userData.id);
+                    canvasRef.current.style.cursor = 'pointer';
+                } else {
+                    setHoveredEquipment(null);
+                    canvasRef.current.style.cursor = isRotating ? 'grabbing' : 'grab';
+                }
+            }
         };
 
         const onMouseUp = () => {
-            isDragging = false;
+            isRotating = false;
+            setIsDraggingObject(false);
+            selectedMeshRef.current = null;
+            canvasRef.current.style.cursor = 'grab';
+        };
+
+        const onContextMenu = (e) => {
+            e.preventDefault();
+
+            // Update mouse position
+            const rect = canvasRef.current.getBoundingClientRect();
+            mouseRef.current.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+            mouseRef.current.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+            // Check for equipment right-click
+            raycaster.setFromCamera(mouseRef.current, camera);
+            const equipmentGroup = scene.getObjectByName('equipment-group');
+
+            if (equipmentGroup) {
+                const intersects = raycaster.intersectObjects(equipmentGroup.children, true);
+
+                if (intersects.length > 0) {
+                    const clickedMesh = intersects[0].object;
+                    const equipmentId = clickedMesh.userData.id;
+                    const equipmentItem = equipment.find(eq => eq.id === equipmentId);
+
+                    if (equipmentItem) {
+                        setContextMenu({
+                            x: e.clientX,
+                            y: e.clientY,
+                            equipment: equipmentItem
+                        });
+                    }
+                }
+            }
         };
 
         const onWheel = (e) => {
+            e.preventDefault();
             const zoomSpeed = 0.001;
             const radius = Math.sqrt(
                 camera.position.x ** 2 + camera.position.y ** 2 + camera.position.z ** 2
@@ -210,7 +379,9 @@ const StudioEmulator = () => {
         canvasRef.current.addEventListener('mousedown', onMouseDown);
         canvasRef.current.addEventListener('mousemove', onMouseMove);
         canvasRef.current.addEventListener('mouseup', onMouseUp);
+        canvasRef.current.addEventListener('contextmenu', onContextMenu);
         canvasRef.current.addEventListener('wheel', onWheel);
+        canvasRef.current.style.cursor = 'grab';
 
         // Animation loop
         const animate = () => {
@@ -234,14 +405,53 @@ const StudioEmulator = () => {
             canvasRef.current?.removeEventListener('mousedown', onMouseDown);
             canvasRef.current?.removeEventListener('mousemove', onMouseMove);
             canvasRef.current?.removeEventListener('mouseup', onMouseUp);
+            canvasRef.current?.removeEventListener('contextmenu', onContextMenu);
             canvasRef.current?.removeEventListener('wheel', onWheel);
             renderer.dispose();
         };
-    }, []);
+    }, [equipment, isDraggingObject]);
+
+    // Update theme colors
+    useEffect(() => {
+        if (!sceneRef.current) return;
+
+        const colors = themeColors[theme];
+        sceneRef.current.background = new THREE.Color(colors.background);
+        sceneRef.current.fog = new THREE.Fog(colors.fog, 10, 50);
+
+        const ambientLight = sceneRef.current.getObjectByName('ambientLight');
+        if (ambientLight) {
+            ambientLight.intensity = colors.ambient;
+        }
+
+        const gridHelper = sceneRef.current.getObjectByName('gridHelper');
+        if (gridHelper) {
+            sceneRef.current.remove(gridHelper);
+            const newGrid = new THREE.GridHelper(20, 20, colors.grid1, colors.grid2);
+            newGrid.name = 'gridHelper';
+            sceneRef.current.add(newGrid);
+        }
+
+        // Update room colors
+        const room = sceneRef.current.getObjectByName('room');
+        if (room) {
+            room.children.forEach(child => {
+                if (child.material) {
+                    if (child.name === 'floor') {
+                        child.material.color.setHex(colors.floor);
+                    } else {
+                        child.material.color.setHex(colors.wall);
+                    }
+                }
+            });
+        }
+    }, [theme]);
 
     // Update room when dimensions change
     useEffect(() => {
         if (!sceneRef.current) return;
+
+        const colors = themeColors[theme];
 
         // Remove old room
         const oldRoom = sceneRef.current.getObjectByName('room');
@@ -256,18 +466,19 @@ const StudioEmulator = () => {
         // Floor
         const floorGeometry = new THREE.PlaneGeometry(roomDimensions.width, roomDimensions.length);
         const floorMaterial = new THREE.MeshStandardMaterial({
-            color: 0x1a1a1a,
+            color: colors.floor,
             roughness: 0.8,
             metalness: 0.2
         });
         const floor = new THREE.Mesh(floorGeometry, floorMaterial);
         floor.rotation.x = -Math.PI / 2;
         floor.receiveShadow = true;
+        floor.name = 'floor';
         roomGroup.add(floor);
 
         // Walls
         const wallMaterial = new THREE.MeshStandardMaterial({
-            color: 0x2a2a2a,
+            color: colors.wall,
             roughness: 0.9,
             metalness: 0.1,
             side: THREE.DoubleSide
@@ -324,7 +535,7 @@ const StudioEmulator = () => {
         roomGroup.add(ceiling);
 
         sceneRef.current.add(roomGroup);
-    }, [roomDimensions]);
+    }, [roomDimensions, theme]);
 
     // Update equipment in scene
     useEffect(() => {
@@ -336,6 +547,12 @@ const StudioEmulator = () => {
             sceneRef.current.remove(oldEquipment);
         }
 
+        // Remove old outline
+        if (outlineRef.current) {
+            sceneRef.current.remove(outlineRef.current);
+            outlineRef.current = null;
+        }
+
         // Create equipment group
         const equipmentGroup = new THREE.Group();
         equipmentGroup.name = 'equipment-group';
@@ -345,11 +562,19 @@ const StudioEmulator = () => {
             if (!catalog) return;
 
             const geometry = new THREE.BoxGeometry(catalog.width, catalog.height, catalog.depth);
+
+            // Check if this item is selected or hovered
+            const isSelected = selectedEquipment?.id === item.id;
+            const isHovered = hoveredEquipment === item.id;
+
             const material = new THREE.MeshStandardMaterial({
                 color: catalog.color,
                 roughness: 0.7,
-                metalness: 0.3
+                metalness: 0.3,
+                emissive: isSelected ? 0x8a2be2 : (isHovered ? 0x444444 : 0x000000),
+                emissiveIntensity: isSelected ? 0.3 : (isHovered ? 0.1 : 0)
             });
+
             const mesh = new THREE.Mesh(geometry, material);
             mesh.position.set(item.x, item.y + catalog.height / 2, item.z);
             mesh.rotation.y = item.rotation;
@@ -358,10 +583,30 @@ const StudioEmulator = () => {
             mesh.userData = { id: item.id, type: item.type };
 
             equipmentGroup.add(mesh);
+
+            // Add outline for selected equipment
+            if (isSelected) {
+                const outlineGeometry = new THREE.BoxGeometry(
+                    catalog.width * 1.05,
+                    catalog.height * 1.05,
+                    catalog.depth * 1.05
+                );
+                const outlineMaterial = new THREE.MeshBasicMaterial({
+                    color: 0x8a2be2,
+                    wireframe: true,
+                    transparent: true,
+                    opacity: 0.5
+                });
+                const outline = new THREE.Mesh(outlineGeometry, outlineMaterial);
+                outline.position.copy(mesh.position);
+                outline.rotation.copy(mesh.rotation);
+                equipmentGroup.add(outline);
+                outlineRef.current = outline;
+            }
         });
 
         sceneRef.current.add(equipmentGroup);
-    }, [equipment]);
+    }, [equipment, selectedEquipment, hoveredEquipment]);
 
     // Update treatments in scene
     useEffect(() => {
@@ -401,6 +646,13 @@ const StudioEmulator = () => {
         sceneRef.current.add(treatmentsGroup);
     }, [treatments]);
 
+    // Close context menu on click
+    useEffect(() => {
+        const closeContextMenu = () => setContextMenu(null);
+        document.addEventListener('click', closeContextMenu);
+        return () => document.removeEventListener('click', closeContextMenu);
+    }, []);
+
     // Add equipment
     const addEquipment = (type) => {
         const newEquipment = {
@@ -412,6 +664,7 @@ const StudioEmulator = () => {
             rotation: 0
         };
         setEquipment([...equipment, newEquipment]);
+        setSelectedEquipment(newEquipment);
     };
 
     // Add treatment
@@ -432,6 +685,7 @@ const StudioEmulator = () => {
         if (selectedEquipment?.id === id) {
             setSelectedEquipment(null);
         }
+        setContextMenu(null);
     };
 
     // Remove treatment
@@ -460,23 +714,101 @@ const StudioEmulator = () => {
     const fundamentalFreq = (343 / (2 * Math.max(roomDimensions.width, roomDimensions.length, roomDimensions.height))).toFixed(1);
 
     return (
-        <div style={{ display: 'flex', width: '100vw', height: '100vh' }}>
+        <div style={{ display: 'flex', width: '100vw', height: '100vh' }} data-theme={theme}>
             <div className="header">
-                <h1>🎵 Studio Emulator</h1>
-                <p>Professional Audio Studio Designer - by Obai Sukar</p>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div>
+                        <h1>🎵 Studio Emulator</h1>
+                        <p>Professional Audio Studio Designer - by Obai Sukar</p>
+                    </div>
+                    <button
+                        onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+                        style={{
+                            padding: '10px 20px',
+                            background: 'rgba(255, 255, 255, 0.1)',
+                            border: '1px solid rgba(255, 255, 255, 0.2)',
+                            borderRadius: '8px',
+                            color: '#fff',
+                            cursor: 'pointer',
+                            fontSize: '14px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '8px'
+                        }}
+                    >
+                        {theme === 'dark' ? '☀️ Light Mode' : '🌙 Dark Mode'}
+                    </button>
+                </div>
             </div>
 
             <div className="canvas-container">
                 <canvas ref={canvasRef} id="studio-canvas" />
             </div>
 
+            {/* Context Menu */}
+            {contextMenu && (
+                <div
+                    style={{
+                        position: 'fixed',
+                        left: contextMenu.x,
+                        top: contextMenu.y,
+                        background: 'rgba(0, 0, 0, 0.95)',
+                        backdropFilter: 'blur(10px)',
+                        border: '1px solid rgba(138, 43, 226, 0.5)',
+                        borderRadius: '8px',
+                        padding: '8px',
+                        zIndex: 1000,
+                        minWidth: '150px'
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                >
+                    <div style={{ padding: '8px', color: '#aaa', fontSize: '12px', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
+                        {equipmentCatalog[contextMenu.equipment.type]?.name}
+                    </div>
+                    <button
+                        onClick={() => {
+                            setSelectedEquipment(contextMenu.equipment);
+                            setContextMenu(null);
+                        }}
+                        style={{
+                            width: '100%',
+                            padding: '8px',
+                            background: 'transparent',
+                            border: 'none',
+                            color: '#fff',
+                            textAlign: 'left',
+                            cursor: 'pointer',
+                            fontSize: '13px',
+                            marginBottom: '4px'
+                        }}
+                    >
+                        ✏️ Edit
+                    </button>
+                    <button
+                        onClick={() => removeEquipment(contextMenu.equipment.id)}
+                        style={{
+                            width: '100%',
+                            padding: '8px',
+                            background: 'transparent',
+                            border: 'none',
+                            color: '#ff6b6b',
+                            textAlign: 'left',
+                            cursor: 'pointer',
+                            fontSize: '13px'
+                        }}
+                    >
+                        🗑️ Delete
+                    </button>
+                </div>
+            )}
+
             <div className="controls-panel">
                 <div className="instructions">
                     <p><strong>🎛️ Controls:</strong></p>
-                    <p>• Click and drag to rotate view</p>
-                    <p>• Mouse wheel to zoom in/out</p>
-                    <p>• Add equipment and acoustic treatments</p>
-                    <p>• Customize room dimensions</p>
+                    <p>• <strong>Left-click + drag</strong> to rotate view</p>
+                    <p>• <strong>Left-click object</strong> to select & drag</p>
+                    <p>• <strong>Right-click object</strong> for menu</p>
+                    <p>• <strong>Mouse wheel</strong> to zoom in/out</p>
                 </div>
 
                 {/* Room Dimensions */}
@@ -547,7 +879,9 @@ const StudioEmulator = () => {
                     <div className="control-section">
                         <h2>📦 Equipment in Studio <span className="badge">{equipment.length}</span></h2>
                         {equipment.map((item) => (
-                            <div key={item.id} className="equipment-item">
+                            <div key={item.id} className="equipment-item" style={{
+                                background: selectedEquipment?.id === item.id ? 'rgba(138, 43, 226, 0.2)' : 'rgba(255, 255, 255, 0.08)'
+                            }}>
                                 <div>
                                     <span>{equipmentCatalog[item.type]?.name}</span>
                                     <span className="equipment-type">{item.type}</span>
@@ -573,37 +907,37 @@ const StudioEmulator = () => {
 
                 {/* Edit Equipment */}
                 {selectedEquipment && (
-                    <div className="control-section">
+                    <div className="control-section" style={{ border: '2px solid rgba(138, 43, 226, 0.5)' }}>
                         <h2>✏️ Edit {equipmentCatalog[selectedEquipment.type]?.name}</h2>
                         <div className="input-group">
-                            <label>X Position</label>
+                            <label>X Position (drag to move)</label>
                             <input
                                 type="number"
                                 step="0.1"
-                                value={selectedEquipment.x}
+                                value={selectedEquipment.x.toFixed(2)}
                                 onChange={(e) => updateEquipmentPosition(selectedEquipment.id, 'x', e.target.value)}
                             />
                         </div>
                         <div className="input-group">
-                            <label>Y Position</label>
+                            <label>Y Position (height)</label>
                             <input
                                 type="number"
                                 step="0.1"
-                                value={selectedEquipment.y}
+                                value={selectedEquipment.y.toFixed(2)}
                                 onChange={(e) => updateEquipmentPosition(selectedEquipment.id, 'y', e.target.value)}
                             />
                         </div>
                         <div className="input-group">
-                            <label>Z Position</label>
+                            <label>Z Position (drag to move)</label>
                             <input
                                 type="number"
                                 step="0.1"
-                                value={selectedEquipment.z}
+                                value={selectedEquipment.z.toFixed(2)}
                                 onChange={(e) => updateEquipmentPosition(selectedEquipment.id, 'z', e.target.value)}
                             />
                         </div>
                         <div className="input-group">
-                            <label>Rotation (degrees)</label>
+                            <label>Rotation: {((selectedEquipment.rotation * 180) / Math.PI).toFixed(0)}°</label>
                             <input
                                 type="range"
                                 min="0"
